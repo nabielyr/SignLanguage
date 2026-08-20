@@ -1,0 +1,30 @@
+# Virtual Environment
+venv/
+__pycache__/
+*.pyc
+
+# Data & Models
+data/
+models/
+*.npy
+*.pkl
+*.joblib
+
+# Audio files
+*.mp3
+*.wav
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+
+# Server logs
+server_log.txt
+server_err.txt

@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SignSpeak — ASL Sign Language Detection</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Background decorative elements -->
+    <div class="bg-blob blob-1"></div>
+    <div class="bg-blob blob-2"></div>
+    <div class="bg-blob blob-3"></div>
+    <div class="bg-grid"></div>
+
+    <!-- Main container -->
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M18 11V6a2 2 0 0 0-4 0v5"/>
+                        <path d="M14 10V4a2 2 0 0 0-4 0v6"/>
+                        <path d="M10 10.5V6a2 2 0 0 0-4 0v8"/>
+                        <path d="M18 8a2 2 0 0 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/>
+                    </svg>
+                </div>
+                <div class="logo-text">
+                    <h1>Sign<span>Speak</span></h1>
+                    <p>ASL Sign Language Detection</p>
+                </div>
+            </div>
+            <div class="status-badge" id="model-status">
+                <span class="status-dot"></span>
+                <span id="model-status-text">Memeriksa model...</span>
+            </div>
+        </header>
+
+        <!-- Main content -->
+        <main class="main-content">
+            <!-- Left: Camera section -->
+            <section class="camera-section">
+                <div class="camera-card">
+                    <div class="camera-header">
+                        <div class="camera-title">
+                            <span class="live-indicator" id="live-indicator"></span>
+                            <h2>Live Detection</h2>
+                        </div>
+                        <div class="camera-controls">
+                            <button class="btn-icon" id="btn-start" title="Mulai kamera">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M23 7l-7 5 7 5V7z"/>
+                                    <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+                                </svg>
+                            </button>
+                            <button class="btn-icon" id="btn-stop" title="Hentikan kamera" disabled>
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <rect x="6" y="6" width="12" height="12" rx="2" ry="2"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="video-container" id="video-container">
+                        <video id="video" autoplay playsinline muted></video>
+                        <canvas id="overlay"></canvas>
+                        <div class="video-placeholder" id="video-placeholder">
+                            <div class="placeholder-icon">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M23 7l-7 5 7 5V7z"/>
+                                    <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+                                </svg>
+                            </div>
+                            <p>Klik tombol kamera untuk mulai</p>
+                            <span>Pastikan webcam tersedia dan izinkan akses</span>
+                        </div>
+                        <div class="detection-overlay" id="detection-overlay">
+                            <div class="detection-word" id="detection-word">—</div>
+                            <div class="detection-confidence" id="detection-confidence">0%</div>
+                        </div>
+                    </div>
+
+                    <div class="camera-footer">
+                        <div class="hand-status" id="hand-status">
+                            <span class="status-dot"></span>
+                            <span id="hand-status-text">Menunggu kamera</span>
+                        </div>
+                        <div class="hint-text">
+                            <span>👋 Tunjukkan isyarat tangan di depan kamera</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Word collection panel -->
+                <div class="words-panel">
+                    <div class="panel-header">
+                        <h3>Kata Terkumpul</h3>
+                        <div class="panel-actions">
+                            <button class="btn-small" id="btn-undo" title="Hapus kata terakhir">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                                    <path d="M3 3v5h5"/>
+                                </svg>
+                                Undo
+                            </button>
+                            <button class="btn-small" id="btn-reset" title="Reset semua kata">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M3 6h18"/>
+                                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                </svg>
+                                Reset
+                            </button>
+                        </div>
+                    </div>
+                    <div class="words-list" id="words-list">
+                        <div class="empty-words">
+                            <span>Belum ada kata. Deteksi isyarat lalu klik "Kumpulkan".</span>
+                        </div>
+                    </div>
+                    <button class="btn-primary btn-add-word" id="btn-add-word" disabled>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 5v14"/>
+                            <path d="M5 12h14"/>
+                        </svg>
+                        Kumpulkan Kata
+                    </button>
+                </div>
+            </section>
+
+            <!-- Right: Sentence section -->
+            <section class="sentence-section">
+                <div class="sentence-card">
+                    <div class="sentence-header">
+                        <h3>Kalimat Hasil</h3>
+                        <span class="sentence-badge">Auto-generated</span>
+                    </div>
+                    <div class="sentence-display" id="sentence-display">
+                        <div class="sentence-placeholder">
+                            <span>Kumpulkan kata-kata untuk membuat kalimat...</span>
+                        </div>
+                    </div>
+                    <div class="sentence-actions">
+                        <button class="btn-primary" id="btn-generate" disabled>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M12 20h9"/>
+                                <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+                            </svg>
+                            Buat Kalimat
+                        </button>
+                        <button class="btn-secondary" id="btn-speak" disabled>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                                <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+                                <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+                            </svg>
+                            Bacakan
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Vocabulary reference -->
+                <div class="vocab-card">
+                    <div class="vocab-header">
+                        <h3>Kosakata</h3>
+                        <span class="vocab-count" id="vocab-count">10 kata</span>
+                    </div>
+                    <div class="vocab-grid" id="vocab-grid">
+                        <!-- Will be populated by JS -->
+                    </div>
+                </div>
+
+                <!-- How to use -->
+                <div class="howto-card">
+                    <div class="howto-header">
+                        <h3>Cara Pakai</h3>
+                    </div>
+                    <ol class="howto-steps">
+                        <li>
+                            <span class="step-num">1</span>
+                            <div>
+                                <strong>Mulai kamera</strong>
+                                <p>Klik tombol kamera dan izinkan akses webcam</p>
+                            </div>
+                        </li>
+                        <li>
+                            <span class="step-num">2</span>
+                            <div>
+                                <strong>Lakukan isyarat</strong>
+                                <p>Tunjukkan salah satu isyarat ASL di depan kamera</p>
+                            </div>
+                        </li>
+                        <li>
+                            <span class="step-num">3</span>
+                            <div>
+                                <strong>Kumpulkan kata</strong>
+                                <p>Klik "Kumpulkan Kata" saat kata terdeteksi dengan benar</p>
+                            </div>
+                        </li>
+                        <li>
+                            <span class="step-num">4</span>
+                            <div>
+                                <strong>Buat kalimat</strong>
+                                <p>Klik "Buat Kalimat" lalu "Bacakan" untuk mendengar hasilnya</p>
+                            </div>
+                        </li>
+                    </ol>
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>SignSpeak — Dibuat dengan ❤️ untuk belajar ASL</p>
+        </footer>
+    </div>
+
+    <!-- Toast notification -->
+    <div class="toast" id="toast"></div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>
