@@ -1,25 +1,26 @@
-"""
+r"""
 =============================================================================
- BACKEND API - ASL Sign Language Detection
+ BACKEND API v2 - ASL Sign Language Detection (2 Tangan + Motion)
 =============================================================================
  Server FastAPI yang mengelola:
  1. WebSocket untuk prediksi real-time dari webcam
- 2. Deteksi tangan dengan MediaPipe
- 3. Klasifikasi kata dengan Random Forest model
+ 2. Deteksi DUA tangan dengan MediaPipe
+ 3. Klasifikasi kata berbasis SEQUENCE gerakan (rolling buffer 30 frame)
+    dengan fitur motion: mean + std + velocity
  4. Penyusunan kalimat & Text-to-Speech
 
  CARA JALANKAN:
- .\venv\Scripts\python.exe -m uvicorn backend.app:app --reload --port 8000
+ .\venv\Scripts\python.exe -m uvicorn backend.app:app --port 8000
 
  Frontend akan otomatis tersedia di: http://localhost:8000
 =============================================================================
 """
 
 import os
-import io
 import base64
 import json
-import threading
+from collections import Counter, deque
+
 import numpy as np
 import cv2
 import mediapipe as mp
@@ -40,21 +41,27 @@ AUDIO_DIR = os.path.join(BASE_DIR, "audio")
 
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
+# Konfigurasi sequence (harus sama dengan collect_data.py & train_model.py)
+SEQ_LEN = 30      # jumlah frame dalam rolling buffer
+FRAME_SIZE = 126  # 2 tangan x 21 titik x 3 koordinat
+
 # ============================================================
 # LOAD MODEL
 # ============================================================
 
 MODEL = None
 WORDS = []
+MODEL_VERSION = 1
 
 def load_model():
     """Memuat model dari disk. Jika belum ada, tampilkan pesan."""
-    global MODEL, WORDS
+    global MODEL, WORDS, MODEL_VERSION
     if os.path.exists(MODEL_PATH):
         data = joblib.load(MODEL_PATH)
         MODEL = data['model']
         WORDS = data['words']
-        print(f"[OK] Model dimuat: {len(WORDS)} kata dikenali")
+        MODEL_VERSION = data.get('version', 1)
+        print(f"[OK] Model dimuat: {len(WORDS)} kata dikenali (v{MODEL_VERSION})")
         return True
     else:
         print("[WARN] Model belum ada. Jalankan train_model.py dulu.")
@@ -63,17 +70,15 @@ def load_model():
 load_model()
 
 # ============================================================
-# MEDIAPIPE HANDS
+# MEDIAPIPE HANDS (2 TANGAN)
 # ============================================================
 
 mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
 
 hands = mp_hands.Hands(
     static_image_mode=False,
-    max_num_hands=1,
-    min_detection_confidence=0.7,
+    max_num_hands=2,              # DETEKSI 2 TANGAN
+    min_detection_confidence=0.6,
     min_tracking_confidence=0.5
 )
 
@@ -81,30 +86,65 @@ hands = mp_hands.Hands(
 # HELPER FUNCTIONS
 # ============================================================
 
-def extract_landmarks(hand_landmarks):
-    """Mengubah 21 landmark menjadi array 63 angka."""
-    landmarks = []
-    for lm in hand_landmarks.landmark:
-        landmarks.extend([lm.x, lm.y, lm.z])
-    return np.array(landmarks)
+def extract_frame_landmarks(result):
+    """
+    Ekstrak landmark KEDUA tangan dari satu frame hasil MediaPipe.
+    Urutan tangan konsisten: "Left" dulu, lalu "Right".
+    Returns array bentuk (126,).
+    """
+    frame_data = np.zeros(FRAME_SIZE)
 
-def predict_word(landmarks):
-    """Prediksi kata dari array landmark."""
+    if not result.multi_hand_landmarks:
+        return frame_data
+
+    hands_list = []
+    for i, hand_landmarks in enumerate(result.multi_hand_landmarks):
+        lm = []
+        for point in hand_landmarks.landmark:
+            lm.extend([point.x, point.y, point.z])
+
+        label = "Right"
+        if result.multi_handedness and i < len(result.multi_handedness):
+            label = result.multi_handedness[i].classification[0].label
+
+        hands_list.append((label, np.array(lm)))
+
+    hands_list.sort(key=lambda x: 0 if x[0] == "Left" else 1)
+
+    for i, (_, lm) in enumerate(hands_list[:2]):
+        frame_data[i * 63:(i + 1) * 63] = lm
+
+    return frame_data
+
+def extract_features_from_sequence(sequence):
+    """
+    Ekstrak fitur motion dari sequence (SEQ_LEN, FRAME_SIZE).
+    Harus sama persis dengan train_model.py!
+
+    Returns array bentuk (378,): [mean(126), std(126), velocity(126)]
+    """
+    seq = np.array(sequence)                    # (SEQ_LEN, 126)
+    feat_mean = seq.mean(axis=0)                # (126,)
+    feat_std = seq.std(axis=0)                  # (126,)
+    velocities = np.diff(seq, axis=0)           # (SEQ_LEN-1, 126)
+    feat_vel = velocities.mean(axis=0)          # (126,)
+    return np.concatenate([feat_mean, feat_std, feat_vel])  # (378,)
+
+def predict_word(features):
+    """Prediksi kata dari vektor fitur motion."""
     if MODEL is None:
         return None, 0.0
 
-    # Reshape ke format yang diminta model
-    features = landmarks.reshape(1, -1)
+    features_reshaped = features.reshape(1, -1)
 
-    # Prediksi probabilitas
-    probabilities = MODEL.predict_proba(features)[0]
-    predicted_idx = np.argmax(probabilities)
-    confidence = probabilities[predicted_idx]
+    probabilities = MODEL.predict_proba(features_reshaped)[0]
+    predicted_idx = int(np.argmax(probabilities))
+    confidence = float(probabilities[predicted_idx])
 
     # Hanya kembalikan prediksi jika confidence cukup tinggi
     if confidence >= 0.6:
-        return WORDS[predicted_idx], float(confidence)
-    return None, float(confidence)
+        return WORDS[predicted_idx], confidence
+    return None, confidence
 
 # ============================================================
 # TEXT-TO-SPEECH
@@ -125,25 +165,18 @@ def generate_speech(text):
 # SMOOTHING (menghaluskan prediksi)
 # ============================================================
 
-# Buffer untuk prediksi berurutan (mengurangi prediksi yang berkedip)
 PREDICTION_BUFFER_SIZE = 5
 prediction_buffer = []
 
 def get_smoothed_prediction(current_prediction):
-    """
-    Menghaluskan prediksi dengan menyimpan N prediksi terakhir
-    dan mengambil yang paling sering muncul.
-    """
+    """Ambil prediksi yang paling sering muncul di N prediksi terakhir."""
     global prediction_buffer
     prediction_buffer.append(current_prediction)
 
-    # Jaga ukuran buffer
     if len(prediction_buffer) > PREDICTION_BUFFER_SIZE:
         prediction_buffer.pop(0)
 
-    # Ambil prediksi yang paling sering muncul di buffer
     if prediction_buffer:
-        from collections import Counter
         counter = Counter(prediction_buffer)
         most_common, count = counter.most_common(1)[0]
 
@@ -157,26 +190,32 @@ def get_smoothed_prediction(current_prediction):
 # ============================================================
 
 class SessionState:
-    """Menyimpan status pengumpulan kata untuk satu sesi."""
+    """
+    Menyimpan status per sesi WebSocket:
+    - words: daftar kata yang dikumpulkan
+    - frame_buffer: rolling buffer 30 frame terakhir untuk deteksi motion
+    - last_word / last_word_count: anti-spam pengumpulan kata
+    """
     def __init__(self):
-        self.words = []          # Daftar kata yang sudah dikumpulkan
-        self.last_word = None    # Kata terakhir yang dideteksi (untuk cegah duplikat)
-        self.last_word_count = 0 # Seberapa lama kata terakhir terdeteksi berturut-turut
+        self.words = []
+        self.last_word = None
+        self.last_word_count = 0
+        self.frame_buffer = deque(maxlen=SEQ_LEN)
 
     def reset(self):
         self.words = []
         self.last_word = None
         self.last_word_count = 0
+        self.frame_buffer.clear()
 
     def add_word(self, word):
-        """Menambahkan kata jika beda dari kata sebelumnya (anti spam)."""
+        """Tambahkan kata jika bertahan minimal 3 prediksi berturut-turut."""
         if word == self.last_word:
             self.last_word_count += 1
         else:
             self.last_word = word
             self.last_word_count = 1
 
-        # Tambahkan hanya jika kata bertahan minimal 3 frame berturut-turut
         if self.last_word_count == 3:
             self.words.append(word)
             return True
@@ -202,7 +241,11 @@ async def index():
 @app.get("/api/words")
 async def get_words():
     """Mengembalikan daftar kata yang dikenali model."""
-    return {"words": WORDS, "model_loaded": MODEL is not None}
+    return {
+        "words": WORDS,
+        "model_loaded": MODEL is not None,
+        "model_version": MODEL_VERSION
+    }
 
 @app.post("/api/speak")
 async def speak(request: dict):
@@ -230,66 +273,65 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 async def websocket_endpoint(websocket: WebSocket):
     """Menerima frame video dari frontend, mengirim prediksi kembali."""
     await websocket.accept()
-
-    # Reset sesi untuk koneksi baru
     session.reset()
 
     try:
         while True:
-            # Terima pesan dari frontend
             message = await websocket.receive_text()
             data = json.loads(message)
 
             # === AKSI: PROSES FRAME VIDEO ===
             if data.get("type") == "frame":
-                # Baca base64 image
-                image_base64 = data["image"].split(",")[1]  # buang prefix "data:image/jpeg;base64,"
+                image_base64 = data["image"].split(",")[1]
                 image_bytes = base64.b64decode(image_base64)
 
-                # Konversi ke array numpy untuk OpenCV
                 nparr = np.frombuffer(image_bytes, np.uint8)
                 frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-                # Proses deteksi
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 result = hands.process(rgb_frame)
 
                 # Variabel hasil
                 current_word = None
                 confidence = 0.0
-                landmarks_detected = False
-                landmark_points = []
+                num_hands = 0
+                hands_points = []   # landmark per tangan: [[21 titik], [21 titik]]
 
                 if result.multi_hand_landmarks:
-                    landmarks_detected = True
-                    hand_landmarks = result.multi_hand_landmarks[0]
+                    num_hands = len(result.multi_hand_landmarks)
 
-                    # Kumpulkan titik landmark untuk digambar di frontend
-                    for lm in hand_landmarks.landmark:
-                        landmark_points.append({
-                            "x": lm.x,
-                            "y": lm.y,
-                            "z": lm.z
-                        })
+                    # Kirim landmark per tangan ke frontend
+                    for hand_landmarks in result.multi_hand_landmarks:
+                        points = []
+                        for lm in hand_landmarks.landmark:
+                            points.append({"x": lm.x, "y": lm.y, "z": lm.z})
+                        hands_points.append(points)
 
-                    # Prediksi kata
-                    if MODEL is not None:
-                        landmarks = extract_landmarks(hand_landmarks)
-                        word, conf = predict_word(landmarks)
-                        if word:
-                            # Smoothed prediction
-                            smoothed = get_smoothed_prediction(word)
-                            if smoothed:
-                                current_word = smoothed
-                                confidence = conf
+                    # ---- PREDIKSI BERBASIS SEQUENCE (motion) ----
+                    if MODEL is not None and MODEL_VERSION >= 2:
+                        # Simpan frame ini ke rolling buffer
+                        frame_data = extract_frame_landmarks(result)
+                        session.frame_buffer.append(frame_data)
 
-                # Kirim hasil prediksi ke frontend
+                        # Prediksi hanya saat buffer penuh (30 frame terkumpul)
+                        if len(session.frame_buffer) >= SEQ_LEN:
+                            features = extract_features_from_sequence(
+                                list(session.frame_buffer)
+                            )
+                            word, conf = predict_word(features)
+                            if word:
+                                smoothed = get_smoothed_prediction(word)
+                                if smoothed:
+                                    current_word = smoothed
+                                    confidence = conf
+
+                # Kirim hasil ke frontend
                 await websocket.send_json({
                     "type": "prediction",
                     "word": current_word,
                     "confidence": round(confidence * 100, 1),
-                    "landmarks_detected": landmarks_detected,
-                    "landmarks": landmark_points
+                    "num_hands": num_hands,
+                    "hands": hands_points
                 })
 
             # === AKSI: TAMBAH KATA KE KOLEKSI ===
@@ -328,7 +370,6 @@ async def websocket_endpoint(websocket: WebSocket):
             # === AKSI: BUAT KALIMAT ===
             elif data.get("type") == "generate_sentence":
                 if session.words:
-                    # Susun kalimat alami dari kata-kata
                     sentence = build_sentence(session.words)
                     await websocket.send_json({
                         "type": "sentence",
@@ -353,21 +394,10 @@ async def websocket_endpoint(websocket: WebSocket):
 # ============================================================
 
 def build_sentence(words):
-    """
-    Menyusun kata-kata yang dikumpulkan menjadi kalimat alami.
-    Kata-kata dari ASL diurutkan dan digabung dengan aturan bahasa Inggris.
-    """
+    """Menyusun kata-kata yang dikumpulkan menjadi kalimat alami."""
     if not words:
         return ""
 
-    # Gabung kata dengan spasi
-    raw = " ".join(words)
-
-    # Aturan penyusunan natural sentence:
-    # 1. Kapital huruf pertama
-    # 2. Tambahkan apostrof jika ada "DONT" -> "don't"
-
-    # Perbaiki kata-kata khusus
     replacements = {
         "DON'T": "don't",
         "HOLD": "hold",
@@ -381,18 +411,9 @@ def build_sentence(words):
         "BE": "be"
     }
 
-    # Ubah semua kata ke huruf kecil dengan pemetaan
-    sentence_words = []
-    for w in words:
-        sentence_words.append(replacements.get(w, w.lower()))
+    sentence_words = [replacements.get(w, w.lower()) for w in words]
+    sentence = " ".join(sentence_words).capitalize()
 
-    # Gabung menjadi kalimat
-    sentence = " ".join(sentence_words)
-
-    # Tambahkan tanda baca dan kapitalisasi
-    sentence = sentence.capitalize()
-
-    # Cek apakah ini kalimat perintah/permintaan (biasanya tidak pakai tanda tanya)
     if sentence:
         sentence += "."
 
@@ -404,8 +425,10 @@ def build_sentence(words):
 
 if __name__ == "__main__":
     import uvicorn
-    print("\n[START] ASL Sign Language Detection")
+    print("")
+    print("[START] ASL Sign Language Detection v2 (2 Tangan + Motion)")
     print("=" * 50)
     print("Server berjalan di: http://localhost:8000")
-    print("Tekan Ctrl+C untuk berhenti\n")
+    print("Tekan Ctrl+C untuk berhenti")
+    print("")
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -1,19 +1,25 @@
-"""
+r"""
 =============================================================================
- TRAINING MODEL - ASL Sign Language Detection
+ TRAINING MODEL v2 - ASL Sign Language Detection (2 Tangan + Motion)
 =============================================================================
- Script ini digunakan untuk melatih model klasifikasi dari data landmark
- yang sudah direkam menggunakan collect_data.py.
+ Script ini melatih model klasifikasi dari data SEQUENCE gerakan tangan
+ yang direkam menggunakan collect_data.py v2.
+
+ PERBEDAAN DARI VERSI LAMA:
+ - Input: sequence 30 frame x 126 nilai (2 tangan), bukan 1 frame statis
+ - Fitur motion: mean + std + velocity -> model paham GERAKAN, bukan
+   hanya pose diam
 
  CARA PAKAI:
- 1. Pastikan data sudah direkam di folder 'data/'
+ 1. Pastikan data sudah direkam di folder 'data/' (format baru v2)
  2. Jalankan:  .\venv\Scripts\python.exe backend\train_model.py
  3. Model akan disimpan di 'models/asl_model.pkl'
 
- MODEL:
- - Random Forest Classifier (akurat & mudah untuk data kecil)
- - Input: 63 angka (21 landmark x 3 koordinat x,y,z)
- - Output: Salah satu dari 10 kata ASL
+ FITUR YANG DIEKSTRAK DARI SETIAP SEQUENCE:
+ - Mean   : rata-rata posisi landmark selama gerakan (pose utama)
+ - Std    : variasi posisi (seberapa stabil/berubah)
+ - Velocity: kecepatan rata-rata antar frame (dinamika gerakan)
+ Total: 378 angka per sampel
 =============================================================================
 """
 
@@ -37,16 +43,26 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 MODEL_PATH = os.path.join(MODEL_DIR, "asl_model.pkl")
 
+# Konfigurasi sequence (harus sama dengan collect_data.py)
+SEQ_LEN = 30      # jumlah frame per sampel
+FRAME_SIZE = 126  # 2 tangan x 21 titik x 3 koordinat
+
 # ============================================================
-# 1. BACA SEMUA DATA
+# 1. BACA SEMUA DATA SEQUENCE
 # ============================================================
 
 def load_data():
-    """Membaca semua file .npy dari folder data/ dan mengembalikan X, y."""
-    X = []  # Fitur (63 angka landmark)
-    y = []  # Label (nama kata)
+    """
+    Membaca semua file .npy dari folder data/.
+    Setiap file berisi sequence bentuk (SEQ_LEN, FRAME_SIZE).
 
-    # Cek apakah folder data ada
+    Returns:
+        X: array bentuk (jumlah_sampel, SEQ_LEN, FRAME_SIZE)
+        y: array label kata
+    """
+    X = []
+    y = []
+
     if not os.path.exists(DATA_DIR):
         print("[ERROR] Folder 'data/' tidak ditemukan!")
         print("   Jalankan collect_data.py dulu untuk merekam data.")
@@ -55,33 +71,74 @@ def load_data():
     for word in WORDS:
         word_dir = os.path.join(DATA_DIR, word)
 
-        # Cek apakah folder kata ada
         if not os.path.exists(word_dir):
             print(f"[WARN] Folder '{word}' tidak ditemukan, dilewati.")
             continue
 
-        # Baca semua file .npy di folder kata
         sample_files = [f for f in os.listdir(word_dir) if f.endswith(".npy")]
+        valid_count = 0
         for sample_file in sample_files:
             file_path = os.path.join(word_dir, sample_file)
-            landmarks = np.load(file_path)
+            seq = np.load(file_path)
 
-            # Validasi: pastikan data 63 angka
-            if landmarks.shape == (63,):
-                X.append(landmarks)
+            # Validasi format baru: (SEQ_LEN, FRAME_SIZE)
+            if seq.shape == (SEQ_LEN, FRAME_SIZE):
+                X.append(seq)
                 y.append(word)
+                valid_count += 1
+            elif seq.shape == (63,):
+                # Data lama (versi 1) - skip dengan pesan sekali saja
+                print(f"[WARN] '{word}' punya data lama (format v1). "
+                      f"Hapus folder 'data/{word}' dan rekam ulang!")
+                break
             else:
-                print(f"[WARN] Skip data tidak valid: {file_path} (shape: {landmarks.shape})")
+                print(f"[WARN] Skip data tidak valid: {file_path} (shape: {seq.shape})")
 
+        if valid_count > 0:
+            print(f"  {word:8s}: {valid_count} sampel")
+
+    if len(X) == 0:
+        return None, None
     return np.array(X), np.array(y)
 
 # ============================================================
-# 2. TRAINING
+# 2. EKSTRAKSI FITUR MOTION
 # ============================================================
 
-def train_model(X, y):
-    """Melatih Random Forest dan menampilkan evaluasi."""
-    print(f"\n[INFO] Total data: {len(X)} sampel, {len(set(y))} kelas\n")
+def extract_features(sequences):
+    """
+    Ubah sequence (N, SEQ_LEN, FRAME_SIZE) menjadi fitur (N, 378).
+
+    Fitur per sequence:
+    - mean     : rata-rata posisi tiap landmark selama gerakan
+    - std      : standar deviasi posisi (variasi gerakan)
+    - velocity : rata-rata perubahan antar frame (kecepatan gerakan)
+    """
+    # Mean & std sepanjang sumbu waktu
+    feat_mean = sequences.mean(axis=1)          # (N, 126)
+    feat_std = sequences.std(axis=1)            # (N, 126)
+
+    # Velocity: selisih antar frame berturut-turut, lalu dirata-rata
+    velocities = np.diff(sequences, axis=1)     # (N, SEQ_LEN-1, 126)
+    feat_vel = velocities.mean(axis=1)          # (N, 126)
+
+    # Gabungkan semua fitur
+    features = np.concatenate([feat_mean, feat_std, feat_vel], axis=1)  # (N, 378)
+
+    return features
+
+# ============================================================
+# 3. TRAINING
+# ============================================================
+
+def train_model(X_seq, y):
+    """Melatih Random Forest dari fitur motion dan menampilkan evaluasi."""
+    print(f"\n[INFO] Total data: {len(X_seq)} sampel, {len(set(y))} kelas")
+
+    # Ekstrak fitur motion
+    print("[INFO] Ekstraksi fitur motion (mean + std + velocity)...")
+    X = extract_features(X_seq)
+    print(f"[INFO] Bentuk fitur: {X.shape}")
 
     # Split data: 80% training, 20% testing
     X_train, X_test, y_train, y_test = train_test_split(
@@ -91,64 +148,47 @@ def train_model(X, y):
     print(f"   Training: {len(X_train)} sampel")
     print(f"   Testing : {len(X_test)} sampel")
 
-    # Random Forest - model yang bagus untuk data landmark
+    # Random Forest
     print("\n[INFO] Melatih model Random Forest...")
     model = RandomForestClassifier(
-        n_estimators=100,     # Jumlah pohon keputusan
-        max_depth=20,         # Kedalaman maksimal pohon
+        n_estimators=200,     # Lebih banyak pohon untuk fitur lebih kompleks
+        max_depth=25,
+        min_samples_leaf=2,
         random_state=42,
-        n_jobs=-1             # Pakai semua core CPU
+        n_jobs=-1
     )
     model.fit(X_train, y_train)
 
     # ============================================================
-    # 3. EVALUASI
+    # 4. EVALUASI
     # ============================================================
 
-    # Prediksi data testing
     y_pred = model.predict(X_test)
-
-    # Akurasi
     accuracy = accuracy_score(y_test, y_pred)
     print(f"\n[OK] Akurasi Model: {accuracy * 100:.2f}%")
 
-    # Laporan detail per kelas
     print("\n[INFO] Laporan Klasifikasi:")
     print(classification_report(y_test, y_pred, zero_division=0))
 
-    # Matriks kebingungan (confusion matrix)
     print("[INFO] Confusion Matrix:")
     print(confusion_matrix(y_test, y_pred))
 
     # ============================================================
-    # 4. SIMPAN MODEL
+    # 5. SIMPAN MODEL
     # ============================================================
 
-    # Buat folder models jika belum ada
     os.makedirs(MODEL_DIR, exist_ok=True)
 
-    # Simpan model dan daftar kata
     joblib.dump({
         'model': model,
-        'words': WORDS
+        'words': WORDS,
+        'seq_len': SEQ_LEN,
+        'frame_size': FRAME_SIZE,
+        'version': 2
     }, MODEL_PATH, compress=3)
 
     print(f"\n[OK] Model tersimpan di: {MODEL_PATH}")
     print(f"   Akurasi: {accuracy * 100:.2f}%")
-
-    # ============================================================
-    # 5. IMPORTANCE FITUR (informasi tambahan)
-    # ============================================================
-    importances = model.feature_importances_
-    # Fitur 0-20 = x, 21-41 = y, 42-62 = z
-    x_importance = importances[0:21].sum()
-    y_importance = importances[21:42].sum()
-    z_importance = importances[42:63].sum()
-
-    print("\n[INFO] Kontribusi Koordinat:")
-    print(f"   X (horizontal): {x_importance * 100:.1f}%")
-    print(f"   Y (vertikal)  : {y_importance * 100:.1f}%")
-    print(f"   Z (kedalaman) : {z_importance * 100:.1f}%")
 
     return accuracy
 
@@ -158,19 +198,18 @@ def train_model(X, y):
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  [TRAIN] TRAINING MODEL - ASL Sign Language Detection")
+    print("  [TRAIN] TRAINING MODEL v2 - ASL Detection (2 Tangan + Motion)")
     print("=" * 60)
 
     # 1. Baca data
-    X, y = load_data()
+    X_seq, y = load_data()
 
-    # Cek apakah ada data
-    if X is None or len(X) == 0:
+    if X_seq is None or len(X_seq) == 0:
         print("\n[ERROR] Tidak ada data untuk dilatih!")
         print("   Jalankan backend/collect_data.py terlebih dahulu.")
         exit(1)
 
     # 2. Latih model
-    train_model(X, y)
+    train_model(X_seq, y)
 
     print("\n[OK] Training selesai! Model siap digunakan.\n")

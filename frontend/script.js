@@ -135,10 +135,10 @@ function handlePrediction(data) {
         btnAddWord.disabled = !wsConnected || isCameraOn === false;
     }
 
-    // Update status tangan
-    if (data.landmarks_detected) {
-        setHandStatus(`Tangan terdeteksi ✓`, '#10b981');
-        drawLandmarks(data.landmarks);
+    // Update status tangan (deteksi hingga 2 tangan)
+    if (data.num_hands > 0) {
+        setHandStatus(`Tangan terdeteksi: ${data.num_hands}/2`, '#10b981');
+        drawLandmarks(data.hands);
     } else {
         setHandStatus('Tangan tidak terdeteksi', '#64748b');
         clearOverlay();
@@ -263,9 +263,26 @@ async function sendFrame() {
     }
 }
 
-// ---------- Landmark Drawing ----------
-function drawLandmarks(landmarks) {
-    if (!landmarks || landmarks.length === 0) {
+// ---------- Landmark Drawing (Multi-hand) ----------
+
+// Koneksi antar landmark (indeks pasangan tulang tangan)
+const HAND_CONNECTIONS = [
+    [0, 1], [1, 2], [2, 3], [3, 4],          // Ibu jari
+    [0, 5], [5, 6], [6, 7], [7, 8],          // Telunjuk
+    [5, 9], [9, 10], [10, 11], [11, 12],     // Jari tengah
+    [9, 13], [13, 14], [14, 15], [15, 16],   // Jari manis
+    [13, 17], [17, 18], [18, 19], [19, 20],  // Kelingking
+    [0, 17]                                  // Pangkal telapak
+];
+
+// Warna berbeda untuk tiap tangan: ungu (tangan 1), cyan (tangan 2)
+const HAND_COLORS = [
+    { line: 'rgba(139, 92, 246, 0.9)', dot: '#a78bfa', glow: 'rgba(139, 92, 246, 0.3)' },
+    { line: 'rgba(6, 182, 212, 0.9)',  dot: '#67e8f9', glow: 'rgba(6, 182, 212, 0.3)' }
+];
+
+function drawLandmarks(hands) {
+    if (!hands || hands.length === 0) {
         clearOverlay();
         return;
     }
@@ -279,51 +296,48 @@ function drawLandmarks(landmarks) {
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Koneksi antar landmark (indeks pasangan)
-    const connections = [
-        [0, 1], [1, 2], [2, 3], [3, 4],          // Ibu jari
-        [0, 5], [5, 6], [6, 7], [7, 8],          // Telunjuk
-        [5, 9], [9, 10], [10, 11], [11, 12],     // Jari tengah
-        [9, 13], [13, 14], [14, 15], [15, 16],   // Jari manis
-        [13, 17], [17, 18], [18, 19], [19, 20],  // Kelingking
-        [0, 17]                                  // Pangkal telapak
-    ];
+    // Gambar setiap tangan dengan warnanya masing-masing
+    hands.forEach((landmarks, handIdx) => {
+        if (!landmarks || landmarks.length === 0) return;
 
-    // Gambar koneksi (garis antar titik)
-    ctx.strokeStyle = 'rgba(99, 102, 241, 0.8)';
-    ctx.lineWidth = 3;
-    ctx.lineCap = 'round';
+        const color = HAND_COLORS[handIdx % HAND_COLORS.length];
 
-    for (const [a, b] of connections) {
-        if (landmarks[a] && landmarks[b]) {
+        // Gambar koneksi (garis antar titik)
+        ctx.strokeStyle = color.line;
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+
+        for (const [a, b] of HAND_CONNECTIONS) {
+            if (landmarks[a] && landmarks[b]) {
+                ctx.beginPath();
+                ctx.moveTo(landmarks[a].x * canvas.width, landmarks[a].y * canvas.height);
+                ctx.lineTo(landmarks[b].x * canvas.width, landmarks[b].y * canvas.height);
+                ctx.stroke();
+            }
+        }
+
+        // Gambar titik landmark
+        for (let i = 0; i < landmarks.length; i++) {
+            const lm = landmarks[i];
+            const x = lm.x * canvas.width;
+            const y = lm.y * canvas.height;
+
+            // Lingkaran luar (glow)
             ctx.beginPath();
-            ctx.moveTo(landmarks[a].x * canvas.width, landmarks[a].y * canvas.height);
-            ctx.lineTo(landmarks[b].x * canvas.width, landmarks[b].y * canvas.height);
+            ctx.arc(x, y, 8, 0, 2 * Math.PI);
+            ctx.fillStyle = color.glow;
+            ctx.fill();
+
+            // Titik dalam
+            ctx.beginPath();
+            ctx.arc(x, y, 4, 0, 2 * Math.PI);
+            ctx.fillStyle = color.dot;
+            ctx.fill();
+            ctx.strokeStyle = 'white';
+            ctx.lineWidth = 1.5;
             ctx.stroke();
         }
-    }
-
-    // Gambar titik landmark
-    for (let i = 0; i < landmarks.length; i++) {
-        const lm = landmarks[i];
-        const x = lm.x * canvas.width;
-        const y = lm.y * canvas.height;
-
-        // Lingkaran luar (glow)
-        ctx.beginPath();
-        ctx.arc(x, y, 8, 0, 2 * Math.PI);
-        ctx.fillStyle = 'rgba(139, 92, 246, 0.3)';
-        ctx.fill();
-
-        // Titik dalam
-        ctx.beginPath();
-        ctx.arc(x, y, 4, 0, 2 * Math.PI);
-        ctx.fillStyle = '#a78bfa';
-        ctx.fill();
-        ctx.strokeStyle = 'white';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-    }
+    });
 }
 
 function clearOverlay() {
