@@ -7,12 +7,14 @@ r"""
  PERBEDAAN DARI VERSI LAMA:
  - Mendeteksi 2 tangan sekaligus (bukan hanya 1)
  - Merekam SEQUENCE 30 frame (~1 detik gerakan), bukan 1 frame statis
+ - Ada COUNTDOWN 1.5 detik setelah tekan SPACE untuk bersiap masuk posisi
  - Model bisa membedakan pose statis vs gerakan dinamis
 
  CARA PAKAI:
  1. Jalankan:  .\venv\Scripts\python.exe backend\collect_data.py
  2. Pilih kata yang ingin direkam dengan menekan tombol angka 0-9
  3. Tekan SPACE untuk mulai merekam 1 sampel:
+    -> Countdown 1.5 detik dimulai (bersiap masuk posisi!)
     -> Sistem otomatis merekam 30 frame (~1 detik)
     -> Lakukan gerakan ASL selama rekaman berjalan!
  4. Ulangi sampel kata yang sama minimal 100 kali
@@ -34,6 +36,7 @@ r"""
 """
 
 import os
+import time
 import cv2
 import numpy as np
 import mediapipe as mp
@@ -57,6 +60,10 @@ SEQ_LEN = 30
 
 # Jumlah nilai per frame: 2 tangan x 21 titik x 3 koordinat
 FRAME_SIZE = 126
+
+# Jeda persiapan sebelum rekaman dimulai (detik)
+# Setelah tekan SPACE, kamu punya waktu ini untuk masuk posisi dulu
+COUNTDOWN_SECONDS = 1.5
 
 # ============================================================
 # INISIALISASI MEDIAPIPE
@@ -144,6 +151,7 @@ def main():
     # State perekaman sequence
     recording = False      # sedang merekam sequence?
     seq_buffer = []        # buffer frame untuk sequence saat ini
+    countdown_start = None # waktu mulai countdown (None = tidak sedang countdown)
 
     print("\n" + "=" * 60)
     print("  [HAND] ALAT REKAM DATA ASL v2 - 2 Tangan + Motion")
@@ -154,8 +162,8 @@ def main():
         print(f"  Tombol {i} = {word:8s} {status}")
 
     print("\n[KONTROL]")
-    print(f"  [0-9]  = Ganti kata yang direkam")
-    print(f"  SPACE  = Rekam 1 sampel ({SEQ_LEN} frame gerakan otomatis)")
+    print("  [0-9]  = Ganti kata yang direkam")
+    print(f"  SPACE  = Rekam 1 sampel ({COUNTDOWN_SECONDS}s persiapan + {SEQ_LEN} frame gerakan)")
     print("  Q      = Keluar")
     print("=" * 60 + "\n")
 
@@ -180,6 +188,22 @@ def main():
                     mp_drawing_styles.get_default_hand_landmarks_style(),
                     mp_drawing_styles.get_default_hand_connections_style()
                 )
+
+        # ---- PROSES COUNTDOWN (persiapan sebelum merekam) ----
+        if countdown_start is not None and not recording:
+            elapsed = time.time() - countdown_start
+            remaining = COUNTDOWN_SECONDS - elapsed
+
+            if remaining <= 0:
+                # Countdown selesai -> mulai merekam
+                countdown_start = None
+                recording = True
+                seq_buffer = []
+                print("[INFO] Mulai merekam! Lakukan gerakannya!")
+            else:
+                # Tampilkan hitungan mundur besar di layar
+                cv2.putText(frame, f"BERSIAP... {remaining:.1f}s", (10, 175),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 200, 255), 2)
 
         # ---- PROSES REKAMAN SEQUENCE ----
         if recording:
@@ -226,7 +250,7 @@ def main():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                     (0, 255, 0) if num_hands > 0 else (0, 0, 255), 2)
 
-        if not recording:
+        if not recording and countdown_start is None:
             cv2.putText(frame, "Tekan SPACE untuk mulai rekam", (10, 170),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
 
@@ -248,11 +272,10 @@ def main():
                 current_index = index
                 print(f"[INFO] Ganti ke kata: {WORDS[current_index]}")
 
-        # SPACE -> mulai rekam sequence baru
-        if key == 32 and not recording:
-            recording = True
-            seq_buffer = []
-            print(f"[INFO] Mulai merekam {SEQ_LEN} frame... lakukan gerakannya!")
+        # SPACE -> mulai countdown, setelah itu rekam sequence baru
+        if key == 32 and not recording and countdown_start is None:
+            countdown_start = time.time()
+            print(f"[INFO] Bersiap! Rekaman dimulai dalam {COUNTDOWN_SECONDS} detik...")
 
     # Bersihkan resource
     cap.release()
